@@ -85,6 +85,14 @@ raw attributes (press `i` in the TUI).
   and `ctls()` in `app.rs` uses it to decide which control-panel rows to show.
 - `colorMode` is `"color"` or (presumably) `"temperature"`. Only `"color"` has been seen on a
   real hub so far.
+- Color (verified on a real hub with IKEA color bulbs): a PATCH with
+  `colorSaturation` but no `colorHue` is rejected with `400 "attributes" does not match any of
+  the allowed types`, so always send both. The hub appears to convert hue/saturation into the
+  bulb's own color space and back (it does not expose that space). As a result, at full
+  saturation, colors the bulb can't produce snap to the nearest one it can (90° came back as
+  60°), saturation loses ~1-2% per round trip, and it can read slightly above 1. `App::color_of()`
+  builds edits on the last requested color, not the reported one, to avoid drift and getting
+  stuck on a snapped hue.
 - `deviceType` values handled: `light`, `outlet`, `blinds`, `airPurifier`,
   `environmentSensor`, `motionSensor`, `openCloseSensor`, `waterSensor`. `gateway` is hidden.
 - There is no official public API documentation. Behaviour has been worked out from community

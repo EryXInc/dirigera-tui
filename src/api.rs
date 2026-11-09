@@ -193,7 +193,18 @@ impl Client {
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             anyhow::bail!("401 Unauthorized — token invalid, re-run `dirigera-tui pair <ip>`");
         }
-        Ok(resp.error_for_status()?)
+        let status = resp.status();
+        if status.is_client_error() || status.is_server_error() {
+            // Include the hub's message, e.g. {"error":"Error","message":"..."}.
+            let body = resp.text().unwrap_or_default();
+            let msg = serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|v| v.get("message")?.as_str().map(str::to_string))
+                .unwrap_or(body);
+            let msg: String = msg.chars().take(120).collect();
+            anyhow::bail!("hub returned {status}: {msg}");
+        }
+        Ok(resp)
     }
 
     /// Fetch a list, skipping entries that don't match the expected shape.

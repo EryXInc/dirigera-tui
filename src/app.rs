@@ -7,7 +7,7 @@ use ratatui::{
 };
 use serde_json::{json, Map, Value};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -213,6 +213,22 @@ fn ctls(d: &Device) -> Vec<Ctl> {
     .collect()
 }
 
+/// How long a requested color is trusted over the hub's (snapped) report.
+const WANTED_TTL: Duration = Duration::from_secs(30);
+
+/// A color the user asked for, see `App::color_of`.
+struct Wanted {
+    hue: f64,
+    sat: f64,
+    at: Instant,
+}
+
+/// Distance between two hues in degrees, accounting for wrap-around.
+fn hue_dist(a: f64, b: f64) -> f64 {
+    let d = (a - b).rem_euclid(360.0);
+    d.min(360.0 - d)
+}
+
 struct App {
     tab: Tab,
     devices: Vec<Device>,
@@ -230,6 +246,8 @@ struct App {
     raw: bool,
     /// Selected control row while the control panel has focus.
     focus: Option<usize>,
+    /// Last requested color per device id.
+    wanted: HashMap<String, Wanted>,
     help: bool,
     quit: bool,
 }
@@ -434,6 +452,30 @@ impl App {
         }
     }
 
+    /// The (hue, saturation) to build the next color edit on for device `i`.
+    ///
+    /// The hub converts hue/saturation to the bulb's own color space and back, so
+    /// what it reports is snapped to colors the bulb can produce (90° can come back
+    /// as 60° at full saturation) and loses ~1-2% saturation per round trip. Edits
+    /// therefore build on what the user last asked for, as long as that was recent
+    /// and the hub still reports something close to it (otherwise the color was
+    /// probably changed elsewhere, e.g. in the IKEA app).
+    fn color_of(&self, i: usize) -> (f64, f64) {
+        let d = &self.devices[i];
+        let h = d.n("colorHue").unwrap_or(0.0);
+        let s = d.n("colorSaturation").unwrap_or(0.0).clamp(0.0, 1.0);
+        match self.wanted.get(&d.id) {
+            Some(w)
+                if w.at.elapsed() < WANTED_TTL
+                    && hue_dist(w.hue, h) < 60.0
+                    && (w.sat - s).abs() < 0.15 =>
+            {
+                (w.hue, w.sat)
+            }
+            _ => (h, s),
+        }
+    }
+
     /// Set a control to an absolute value (in the control's own units). `wake`
     /// turns lights on when brightness changes, so brightening an off light works.
     fn set_ctl(&mut self, it: Item, ctl: Ctl, v: f64, wake: bool) {
@@ -456,13 +498,23 @@ impl App {
                 };
                 json!({ "colorTemperature": v.clamp(lo, hi).round() as i64 })
             }
-            Ctl::Hue => {
-                // A hue change on a desaturated bulb would be invisible.
-                let sat = d.n("colorSaturation").unwrap_or(0.0);
-                let sat = if sat < 0.1 { 1.0 } else { sat };
-                json!({ "colorHue": v.rem_euclid(360.0).round(), "colorSaturation": sat })
+            // The hub rejects colorSaturation unless colorHue is in the same PATCH,
+            // so color edits always send both.
+            Ctl::Hue | Ctl::Sat => {
+                let (h, s) = self.color_of(i);
+                let (hue, sat) = if ctl == Ctl::Hue {
+                    // A hue change on a desaturated bulb would be invisible.
+                    (v.rem_euclid(360.0).round(), if s < 0.1 { 1.0 } else { s })
+                } else {
+                    (h, (v.clamp(0.0, 1.0) * 100.0).round() / 100.0)
+                };
+                let at = Instant::now();
+                for &t in &ts {
+                    let w = Wanted { hue, sat, at };
+                    self.wanted.insert(self.devices[t].id.clone(), w);
+                }
+                json!({ "colorHue": hue, "colorSaturation": sat })
             }
-            Ctl::Sat => json!({ "colorSaturation": (v.clamp(0.0, 1.0) * 100.0).round() / 100.0 }),
             Ctl::Blinds => json!({ "blindsTargetLevel": v.round().clamp(0.0, 100.0) as i64 }),
             Ctl::Fan => {
                 json!({ "fanMode": FAN_MODES[(v.round() as usize).min(FAN_MODES.len() - 1)] })
@@ -483,8 +535,8 @@ impl App {
                 };
                 cur + steps * ((hi - lo) / 100.0).max(1.0)
             }
-            Ctl::Hue => d.n("colorHue").unwrap_or(0.0) + steps,
-            Ctl::Sat => d.n("colorSaturation").unwrap_or(0.0) + steps / 100.0,
+            Ctl::Hue => self.color_of(self.targets(it).0).0 + steps,
+            Ctl::Sat => self.color_of(self.targets(it).0).1 + steps / 100.0,
             Ctl::Blinds => blinds_level(d) + steps,
             Ctl::Fan => {
                 let n = FAN_MODES.len() as i64;
@@ -1248,6 +1300,7 @@ pub fn run(client: Client) -> Result<()> {
         loaded: false,
         raw: false,
         focus: None,
+        wanted: HashMap::new(),
         help: false,
         quit: false,
     };

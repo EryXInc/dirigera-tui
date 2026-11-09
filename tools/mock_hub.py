@@ -35,9 +35,20 @@ class H(BaseHTTPRequestHandler):
     def do_PATCH(self):
         body=json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         sys.stderr.write("BODY "+json.dumps(body)+"\n")
+        a=body[0]["attributes"]
+        # Real hub behaviour: saturation is only accepted together with hue.
+        if "colorSaturation" in a and "colorHue" not in a:
+            return self.send({"error":"Error","message":"\"attributes\" does not match any of the allowed types"},400)
         i=self.path.split("/")[-1]
         for d in devs:
-            if d["id"]==i: d["attributes"].update(body[0]["attributes"])
+            if d["id"]==i:
+                d["attributes"].update(a)
+                # Rough imitation of a real color bulb (values seen on a real color bulb):
+                # each color write loses a little saturation, and colors the LEDs
+                # can't produce snap to the nearest one they can.
+                if "colorHue" in a:
+                    at=d["attributes"]; at["colorSaturation"]=round(a["colorSaturation"]*0.98,4)
+                    if a["colorSaturation"]>=0.95 and 65<a["colorHue"]<115: at["colorHue"]=60.0
         self.send_response(202); self.send_header("Content-Length","0"); self.end_headers()
     def do_POST(self):
         self.send_response(202); self.send_header("Content-Length","0"); self.end_headers()
