@@ -85,6 +85,15 @@ pub struct Room {
     pub name: String,
 }
 
+/// A device set ("combined light"), e.g. a ceiling fixture with several bulbs.
+/// The hub lists it on each member device under `deviceSet`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SetRef {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Device {
@@ -95,6 +104,8 @@ pub struct Device {
     pub is_reachable: bool,
     #[serde(default)]
     pub room: Option<Room>,
+    #[serde(default)]
+    pub device_set: Option<Vec<SetRef>>,
     #[serde(default)]
     pub attributes: Map<String, Value>,
 }
@@ -119,6 +130,10 @@ impl Device {
             .find(|s| !s.is_empty())
             .unwrap_or(&self.device_type)
             .to_string()
+    }
+    /// The set this device belongs to, if any.
+    pub fn set(&self) -> Option<&SetRef> {
+        self.device_set.as_ref()?.first()
     }
     pub fn room_name(&self) -> &str {
         self.room.as_ref().map(|r| r.name.as_str()).unwrap_or("—")

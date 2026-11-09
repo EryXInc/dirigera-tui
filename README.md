@@ -16,6 +16,8 @@ It talks directly to the hub on your local network, with no cloud and no IKEA ac
 - Sensors: temperature, humidity, PM2.5, motion, door/window, water leak, battery
 - Scenes: trigger them from a list
 - Toggle all the lights in a room at once
+- Device sets (combined lights, e.g. a fixture with several bulbs) show as one row
+  that controls every bulb; press `e` to expand it and control bulbs one by one
 - Changes show up instantly, and the device list refreshes every few seconds
 
 ## Install
@@ -61,6 +63,7 @@ private, because anyone with the token can control your devices. You can also us
 | `[` `]`            | Warmer / cooler light                          |
 | `c` `C`            | Cycle color                                    |
 | `a`                | Toggle all lights in the selected device's room |
+| `e`                | Expand / collapse a device set                 |
 | `i`                | Show the device's raw data from the hub        |
 | `r`                | Refresh now                                    |
 | `?`                | Help                                           |

@@ -75,6 +75,10 @@ raw attributes (press `i` in the TUI).
   max, so always take min/max of the pair), `colorHue` (0–360), `colorSaturation` (0–1),
   `blindsCurrentLevel`/`blindsTargetLevel`, `fanMode`, `batteryPercentage`,
   `currentTemperature`, `currentRH`, `currentPM25`, `isDetected`, `isOpen`, `waterLeakDetected`.
+- Device sets ("combined lights"): each member device has a top-level `deviceSet` array of
+  `{id, name, icon}` (verified on a real hub; empty when not in a set). The TUI groups members
+  into one row and controls a set by PATCHing each member. No set list or set PATCH endpoint
+  has been found (`/device-set` and `/deviceSets` return 404).
 - `deviceType` values handled: `light`, `outlet`, `blinds`, `airPurifier`,
   `environmentSensor`, `motionSensor`, `openCloseSensor`, `waterSensor`. `gateway` is hidden.
 - There is no official public API documentation. Behaviour has been worked out from community
@@ -84,7 +88,7 @@ raw attributes (press `i` in the TUI).
 
 - Not yet tested against real hardware for blinds, air purifiers or color bulbs.
 - Blinds direction (whether 100 means closed or open) is assumed, not verified.
-- No support for speakers, device sets, or editing rooms or scenes.
+- No support for speakers, or for editing rooms, scenes or device sets.
 - Pairing requires a hub IP. There is no mDNS discovery.
 
 ## Conventions

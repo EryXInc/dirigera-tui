@@ -6,7 +6,8 @@ Usage (from the repo root):
     python3 tools/mock_hub.py
     DIRIGERA_HOST=127.0.0.1:18443 DIRIGERA_TOKEN=TOK cargo run
 
-Logs every PATCH body to stderr. Device data is invented, not captured from a real hub.
+Logs every PATCH body to stderr. Device data is invented, not captured from a real hub (except the `deviceSet`
+shape, which matches a real hub).
 """
 import os
 import json, ssl, sys
@@ -15,6 +16,8 @@ R={"id":"r1","name":"Living room"}; K={"id":"r2","name":"Kitchen"}
 devs=[
  {"id":"a","deviceType":"light","isReachable":True,"room":R,"attributes":{"customName":"Ceiling","model":"TRADFRI bulb","firmwareVersion":"1.0","isOn":True,"lightLevel":70,"colorTemperature":2700,"colorTemperatureMin":4000,"colorTemperatureMax":2202,"colorHue":30,"colorSaturation":0.5}},
  {"id":"b","deviceType":"light","isReachable":True,"room":R,"attributes":{"customName":"Floor lamp","isOn":False,"lightLevel":40}},
+ {"id":"s1","deviceType":"light","isReachable":True,"room":K,"deviceSet":[{"id":"set1","name":"Spots","icon":"lighting_group"}],"attributes":{"customName":"Spot 1","isOn":True,"lightLevel":50,"colorTemperature":3000,"colorTemperatureMin":4000,"colorTemperatureMax":2202}},
+ {"id":"s2","deviceType":"light","isReachable":True,"room":K,"deviceSet":[{"id":"set1","name":"Spots","icon":"lighting_group"}],"attributes":{"customName":"Spot 2","isOn":False,"lightLevel":80,"colorTemperature":3000,"colorTemperatureMin":4000,"colorTemperatureMax":2202}},
  {"id":"c","deviceType":"outlet","isReachable":True,"room":K,"attributes":{"customName":"Coffee","isOn":True}},
  {"id":"d","deviceType":"environmentSensor","isReachable":True,"room":K,"attributes":{"customName":"VINDSTYRKA","currentTemperature":21.4,"currentRH":44,"currentPM25":3}},
  {"id":"e","deviceType":"blinds","isReachable":False,"room":R,"attributes":{"customName":"Blind","blindsCurrentLevel":20,"blindsTargetLevel":20,"batteryPercentage":80}},

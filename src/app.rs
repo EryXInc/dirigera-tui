@@ -7,6 +7,7 @@ use ratatui::{
 };
 use serde_json::{json, Map, Value};
 use std::{
+    collections::HashSet,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -115,9 +116,30 @@ enum Tab {
     Scenes,
 }
 
+/// One row in the device list.
+#[derive(PartialEq, Clone, Copy)]
+enum Item {
+    /// Index into `App::devices`.
+    Dev(usize),
+    /// Index into `App::sets`.
+    Set(usize),
+}
+
+/// A device set ("combined light"), assembled from the members' `deviceSet` field.
+struct DevSet {
+    id: String,
+    name: String,
+    /// Indices into `App::devices`, never empty.
+    members: Vec<usize>,
+}
+
 struct App {
     tab: Tab,
     devices: Vec<Device>,
+    sets: Vec<DevSet>,
+    items: Vec<Item>,
+    /// Ids of sets whose members are shown as separate rows.
+    expanded: HashSet<String>,
     scenes: Vec<Scene>,
     dev_state: TableState,
     scene_state: ListState,
@@ -152,54 +174,148 @@ impl App {
             return; // fetched before our latest edit reached the hub; a newer one is coming
         }
         devices.retain(|d| d.device_type != "gateway");
-        devices.sort_by(|a, b| {
+        // Members of a set sort under the set's name so they stay together.
+        let key = |d: &Device| {
             (
-                a.room.is_none(),
-                a.room_name(),
-                type_rank(&a.device_type),
-                a.name(),
+                d.room.is_none(),
+                d.room_name().to_string(),
+                type_rank(&d.device_type),
+                d.set().map(|s| s.name.clone()).unwrap_or_else(|| d.name()),
+                d.set().map(|s| s.id.clone()),
+                d.name(),
             )
-                .cmp(&(
-                    b.room.is_none(),
-                    b.room_name(),
-                    type_rank(&b.device_type),
-                    b.name(),
-                ))
-        });
+        };
+        devices.sort_by_cached_key(key);
         let mut scenes = scenes;
         scenes.sort_by_key(|s| s.info.name.to_lowercase());
 
-        // Keep the selection on the same device/scene across refreshes.
-        let keep = |old: Option<usize>, old_ids: Vec<&str>, new_ids: Vec<&str>| -> Option<usize> {
-            let id = old.and_then(|i| old_ids.get(i).copied());
-            id.and_then(|id| new_ids.iter().position(|n| *n == id))
-                .or(if new_ids.is_empty() {
-                    None
-                } else {
-                    Some(old.unwrap_or(0).min(new_ids.len() - 1))
-                })
-        };
-        let d_sel = keep(
-            self.dev_state.selected(),
-            self.devices.iter().map(|d| d.id.as_str()).collect(),
-            devices.iter().map(|d| d.id.as_str()).collect(),
-        );
-        let s_sel = keep(
-            self.scene_state.selected(),
-            self.scenes.iter().map(|s| s.id.as_str()).collect(),
-            scenes.iter().map(|s| s.id.as_str()).collect(),
-        );
+        // Keep the selection on the same row/scene across refreshes.
+        let old_key = self.sel_item().map(|it| self.item_key(it));
+        let old_scene = self
+            .scene_state
+            .selected()
+            .and_then(|i| self.scenes.get(i))
+            .map(|s| s.id.clone());
         self.devices = devices;
         self.scenes = scenes;
-        self.dev_state.select(d_sel);
+        self.rebuild();
+        self.select_key(old_key, self.dev_state.selected());
+        let s_sel = old_scene
+            .and_then(|id| self.scenes.iter().position(|s| s.id == id))
+            .or_else(|| {
+                (!self.scenes.is_empty()).then(|| {
+                    self.scene_state
+                        .selected()
+                        .unwrap_or(0)
+                        .min(self.scenes.len() - 1)
+                })
+            });
         self.scene_state.select(s_sel);
         self.loaded = true;
     }
 
-    fn selected(&self) -> Option<usize> {
+    /// Rebuild `sets` and the visible rows from `devices` (which must be sorted).
+    fn rebuild(&mut self) {
+        self.sets.clear();
+        for (i, d) in self.devices.iter().enumerate() {
+            if let Some(s) = d.set() {
+                match self.sets.iter_mut().find(|x| x.id == s.id) {
+                    Some(x) => x.members.push(i),
+                    None => self.sets.push(DevSet {
+                        id: s.id.clone(),
+                        name: if s.name.is_empty() {
+                            "Device set".into()
+                        } else {
+                            s.name.clone()
+                        },
+                        members: vec![i],
+                    }),
+                }
+            }
+        }
+        self.items.clear();
+        let mut seen = vec![false; self.sets.len()];
+        for (i, d) in self.devices.iter().enumerate() {
+            let Some(k) = d
+                .set()
+                .and_then(|s| self.sets.iter().position(|x| x.id == s.id))
+            else {
+                self.items.push(Item::Dev(i));
+                continue;
+            };
+            if !std::mem::replace(&mut seen[k], true) {
+                self.items.push(Item::Set(k));
+                if self.expanded.contains(&self.sets[k].id) {
+                    self.items
+                        .extend(self.sets[k].members.iter().map(|&m| Item::Dev(m)));
+                }
+            }
+        }
+    }
+
+    fn item_key(&self, it: Item) -> String {
+        match it {
+            Item::Dev(i) => self.devices[i].id.clone(),
+            Item::Set(k) => format!("set:{}", self.sets[k].id),
+        }
+    }
+
+    /// Select the row with `key`, or clamp `fallback` into range.
+    fn select_key(&mut self, key: Option<String>, fallback: Option<usize>) {
+        let pos =
+            key.and_then(|k| (0..self.items.len()).find(|&j| self.item_key(self.items[j]) == k));
+        let sel = pos.or_else(|| {
+            (!self.items.is_empty()).then(|| fallback.unwrap_or(0).min(self.items.len() - 1))
+        });
+        self.dev_state.select(sel);
+    }
+
+    fn sel_item(&self) -> Option<Item> {
         self.dev_state
             .selected()
-            .filter(|&i| i < self.devices.len())
+            .and_then(|i| self.items.get(i).copied())
+    }
+
+    /// (representative device, all devices to change) for a row. For a set the
+    /// representative is the first reachable member; its values drive the edit.
+    fn targets(&self, it: Item) -> (usize, Vec<usize>) {
+        match it {
+            Item::Dev(i) => (i, vec![i]),
+            Item::Set(k) => {
+                let m = &self.sets[k].members;
+                let rep = m
+                    .iter()
+                    .copied()
+                    .find(|&j| self.devices[j].is_reachable)
+                    .unwrap_or(m[0]);
+                (rep, m.clone())
+            }
+        }
+    }
+
+    fn apply(&mut self, ts: &[usize], attrs: Value) {
+        for &t in ts {
+            self.set(t, attrs.clone());
+        }
+    }
+
+    fn toggle_expand(&mut self, it: Item) {
+        let k = match it {
+            Item::Set(k) => k,
+            Item::Dev(i) => match self.devices[i]
+                .set()
+                .and_then(|s| self.sets.iter().position(|x| x.id == s.id))
+            {
+                Some(k) => k,
+                None => return self.status("Not part of a device set", true),
+            },
+        };
+        let id = self.sets[k].id.clone();
+        if !self.expanded.remove(&id) {
+            self.expanded.insert(id.clone());
+        }
+        self.rebuild();
+        self.select_key(Some(format!("set:{id}")), self.dev_state.selected());
     }
 
     /// Apply attributes optimistically and send them to the hub.
@@ -215,45 +331,50 @@ impl App {
         });
     }
 
-    fn toggle(&mut self, i: usize) {
+    fn toggle(&mut self, it: Item) {
+        let (i, ts) = self.targets(it);
         let d = &self.devices[i];
         if d.device_type == "blinds" {
             let cur = d
                 .n("blindsTargetLevel")
                 .or(d.n("blindsCurrentLevel"))
                 .unwrap_or(0.0);
-            self.set(
-                i,
+            self.apply(
+                &ts,
                 json!({ "blindsTargetLevel": if cur < 50.0 { 100 } else { 0 } }),
             );
         } else if d.device_type == "airPurifier" {
             const MODES: [&str; 5] = ["off", "auto", "low", "medium", "high"];
             let cur = d.s("fanMode").unwrap_or("off");
             let next = MODES[(MODES.iter().position(|m| *m == cur).unwrap_or(0) + 1) % MODES.len()];
-            self.set(i, json!({ "fanMode": next }));
-        } else if let Some(on) = d.b("isOn") {
-            self.set(i, json!({ "isOn": !on }));
+            self.apply(&ts, json!({ "fanMode": next }));
+        } else if d.b("isOn").is_some() {
+            // For a set: if anything is on, turn everything off.
+            let any_on = ts.iter().any(|&j| self.devices[j].b("isOn") == Some(true));
+            self.apply(&ts, json!({ "isOn": !any_on }));
         } else {
             self.status("Nothing to toggle on this device", true);
         }
     }
 
-    fn adjust(&mut self, i: usize, delta: f64) {
+    fn adjust(&mut self, it: Item, delta: f64) {
+        let (i, ts) = self.targets(it);
         let d = &self.devices[i];
         if let Some(lvl) = d.n("lightLevel") {
             let new = (lvl + delta).clamp(1.0, 100.0) as i64;
-            if d.b("isOn") == Some(false) && delta > 0.0 {
-                self.set(i, json!({ "isOn": true, "lightLevel": new }));
+            let any_off = ts.iter().any(|&j| self.devices[j].b("isOn") == Some(false));
+            if any_off && delta > 0.0 {
+                self.apply(&ts, json!({ "isOn": true, "lightLevel": new }));
             } else {
-                self.set(i, json!({ "lightLevel": new }));
+                self.apply(&ts, json!({ "lightLevel": new }));
             }
         } else if d.device_type == "blinds" {
             let cur = d
                 .n("blindsTargetLevel")
                 .or(d.n("blindsCurrentLevel"))
                 .unwrap_or(0.0);
-            self.set(
-                i,
+            self.apply(
+                &ts,
                 json!({ "blindsTargetLevel": (cur + delta).clamp(0.0, 100.0) as i64 }),
             );
         } else {
@@ -261,7 +382,8 @@ impl App {
         }
     }
 
-    fn color_temp(&mut self, i: usize, dir: f64) {
+    fn color_temp(&mut self, it: Item, dir: f64) {
+        let (i, ts) = self.targets(it);
         let d = &self.devices[i];
         let (Some(cur), Some(a), Some(b)) = (
             d.n("colorTemperature"),
@@ -272,26 +394,28 @@ impl App {
         };
         let (lo, hi) = (a.min(b), a.max(b));
         let step = ((hi - lo) / 10.0).max(1.0);
-        self.set(
-            i,
+        self.apply(
+            &ts,
             json!({ "colorTemperature": (cur + dir * step).clamp(lo, hi) as i64 }),
         );
     }
 
-    fn hue(&mut self, i: usize, dir: f64) {
+    fn hue(&mut self, it: Item, dir: f64) {
+        let (i, ts) = self.targets(it);
         let d = &self.devices[i];
         let Some(h) = d.n("colorHue") else {
             return self.status("This device has no color support", true);
         };
         let sat = d.n("colorSaturation").unwrap_or(0.0);
         let sat = if sat < 0.1 { 1.0 } else { sat };
-        self.set(
-            i,
+        self.apply(
+            &ts,
             json!({ "colorHue": (h + 30.0 * dir).rem_euclid(360.0), "colorSaturation": sat }),
         );
     }
 
-    fn room_toggle(&mut self, i: usize) {
+    fn room_toggle(&mut self, it: Item) {
+        let (i, _) = self.targets(it);
         let Some(room) = self.devices[i].room.as_ref().map(|r| r.id.clone()) else {
             return self.status("Device isn't in a room", true);
         };
@@ -355,8 +479,9 @@ impl App {
                 }
             }
             _ => {
-                let Some(i) = self.selected() else { return };
+                let Some(i) = self.sel_item() else { return };
                 match code {
+                    KeyCode::Char('e') => self.toggle_expand(i),
                     KeyCode::Enter | KeyCode::Char(' ') => self.toggle(i),
                     KeyCode::Right | KeyCode::Char('l' | '+' | '=') => self.adjust(i, 10.0),
                     KeyCode::Left | KeyCode::Char('h' | '-') => self.adjust(i, -10.0),
@@ -375,7 +500,7 @@ impl App {
 
     fn move_sel(&mut self, delta: i64) {
         let (len, sel) = match self.tab {
-            Tab::Devices => (self.devices.len(), self.dev_state.selected()),
+            Tab::Devices => (self.items.len(), self.dev_state.selected()),
             Tab::Scenes => (self.scenes.len(), self.scene_state.selected()),
         };
         if len == 0 {
@@ -495,13 +620,20 @@ fn summary(d: &Device) -> (&'static str, Style, String) {
     }
 }
 
+fn label(s: &str) -> Span<'static> {
+    Span::styled(format!("{s:<12}"), Style::new().fg(Color::DarkGray))
+}
+
+fn raw_lines(d: &Device) -> Vec<Line<'static>> {
+    let txt = serde_json::to_string_pretty(&d.attributes).unwrap_or_default();
+    txt.lines().map(|l| Line::raw(l.to_string())).collect()
+}
+
 fn details(d: &Device, raw: bool) -> Vec<Line<'static>> {
-    let label = |s: &str| Span::styled(format!("{s:<12}"), Style::new().fg(Color::DarkGray));
-    let mut lines = Vec::new();
     if raw {
-        let txt = serde_json::to_string_pretty(&d.attributes).unwrap_or_default();
-        return txt.lines().map(|l| Line::raw(l.to_string())).collect();
+        return raw_lines(d);
     }
+    let mut lines = Vec::new();
     let mut kv = |k: &str, v: String| lines.push(Line::from(vec![label(k), Span::raw(v)]));
     kv("Type", d.device_type.clone());
     kv("Room", d.room_name().to_string());
@@ -538,7 +670,48 @@ fn details(d: &Device, raw: bool) -> Vec<Line<'static>> {
         kv("Fan mode", m.to_string());
     }
     lines.push(Line::raw(""));
+    lines.extend(controls(d));
+    lines
+}
 
+/// Details for a device set: its members, then the controls of the representative.
+fn set_details(s: &DevSet, devices: &[Device], rep: usize, raw: bool) -> Vec<Line<'static>> {
+    let dim = Style::new().fg(Color::DarkGray);
+    let r = &devices[rep];
+    if raw {
+        let mut lines = vec![Line::styled(format!("// member: {}", r.name()), dim)];
+        lines.extend(raw_lines(r));
+        return lines;
+    }
+    let mut lines = vec![
+        Line::from(vec![
+            label("Type"),
+            Span::raw(format!("{} set", r.device_type)),
+        ]),
+        Line::from(vec![label("Room"), Span::raw(r.room_name().to_string())]),
+        Line::from(vec![
+            label("Members"),
+            Span::raw(s.members.len().to_string()),
+        ]),
+    ];
+    for &j in &s.members {
+        let d = &devices[j];
+        let (icon, istyle, val) = summary(d);
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(icon, istyle),
+            Span::raw(format!(" {} ", d.name())),
+            Span::styled(val, dim),
+        ]));
+    }
+    lines.push(Line::raw(""));
+    lines.extend(controls(r));
+    lines
+}
+
+/// Bars for brightness, color temperature, color and blinds level.
+fn controls(d: &Device) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
     const W: usize = 20;
     if let Some(l) = d.n("lightLevel") {
         let mut spans = vec![label("Brightness")];
@@ -598,6 +771,7 @@ const HELP: &[(&str, &str)] = &[
     ("[ ]", "warmer / cooler"),
     ("c C", "cycle hue"),
     ("a", "toggle all lights in room"),
+    ("e", "expand / collapse device set"),
     ("i", "show raw attributes"),
     ("r", "refresh"),
     ("q Esc", "quit"),
@@ -638,18 +812,56 @@ fn draw(f: &mut Frame, app: &mut App) {
         let [list_area, detail_area] =
             Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
                 .areas(body);
-        let rows = app.devices.iter().map(|d| {
-            let (icon, istyle, val) = summary(d);
+        let rows = app.items.iter().map(|&it| {
+            let (d, name, reachable, val) = match it {
+                Item::Dev(i) => {
+                    let d = &app.devices[i];
+                    // Expanded set members get a tree prefix.
+                    let prefix = match d.set().and_then(|s| app.sets.iter().find(|x| x.id == s.id))
+                    {
+                        Some(s) if s.members.last() == Some(&i) => " └ ",
+                        Some(_) => " ├ ",
+                        None => "",
+                    };
+                    (d, format!("{prefix}{}", d.name()), d.is_reachable, None)
+                }
+                Item::Set(k) => {
+                    let s = &app.sets[k];
+                    let is_on = |j: &usize| app.devices[*j].b("isOn") == Some(true);
+                    let on = s.members.iter().filter(|j| is_on(j)).count();
+                    // Show an "on" member if there is one, so the icon reflects it.
+                    let shown = s
+                        .members
+                        .iter()
+                        .copied()
+                        .find(|j| is_on(j))
+                        .unwrap_or(app.targets(it).0);
+                    let n = s.members.len();
+                    let arrow = if app.expanded.contains(&s.id) {
+                        "▾"
+                    } else {
+                        "▸"
+                    };
+                    let mixed = (on > 0 && on < n).then(|| format!("{on}/{n} on"));
+                    (
+                        &app.devices[shown],
+                        format!("{arrow} {} ({n})", s.name),
+                        s.members.iter().any(|&j| app.devices[j].is_reachable),
+                        mixed,
+                    )
+                }
+            };
+            let (icon, istyle, sval) = summary(d);
             let row = Row::new(vec![
                 Cell::from(Span::styled(icon, istyle)),
-                Cell::from(d.name()),
+                Cell::from(name),
                 Cell::from(Span::styled(
                     d.room_name().to_string(),
                     Style::new().fg(Color::DarkGray),
                 )),
-                Cell::from(Line::from(val).right_aligned()),
+                Cell::from(Line::from(val.unwrap_or(sval)).right_aligned()),
             ]);
-            if d.is_reachable {
+            if reachable {
                 row
             } else {
                 row.style(Style::new().fg(Color::DarkGray))
@@ -669,10 +881,22 @@ fn draw(f: &mut Frame, app: &mut App) {
         .highlight_symbol("▶ ");
         f.render_stateful_widget(table, list_area, &mut app.dev_state);
 
-        if let Some(d) = app.selected().map(|i| &app.devices[i]) {
-            let title = format!(" {} {}", d.name(), if app.raw { "(raw) " } else { "" });
+        let pane = match app.sel_item() {
+            Some(Item::Dev(i)) => {
+                let d = &app.devices[i];
+                Some((d.name(), details(d, app.raw)))
+            }
+            Some(it @ Item::Set(k)) => {
+                let s = &app.sets[k];
+                let rep = app.targets(it).0;
+                Some((s.name.clone(), set_details(s, &app.devices, rep, app.raw)))
+            }
+            None => None,
+        };
+        if let Some((name, lines)) = pane {
+            let title = format!(" {name} {}", if app.raw { "(raw) " } else { "" });
             f.render_widget(
-                Paragraph::new(details(d, app.raw))
+                Paragraph::new(lines)
                     .block(Block::bordered().title(title))
                     .wrap(Wrap { trim: false }),
                 detail_area,
@@ -739,6 +963,9 @@ pub fn run(client: Client) -> Result<()> {
     let mut app = App {
         tab: Tab::Devices,
         devices: vec![],
+        sets: vec![],
+        items: vec![],
+        expanded: HashSet::new(),
         scenes: vec![],
         dev_state: TableState::default(),
         scene_state: ListState::default(),
