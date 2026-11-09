@@ -16,7 +16,12 @@ It talks directly to the hub on your local network, with no cloud and no IKEA ac
 - Air purifiers: fan mode
 - Sensors: temperature, humidity, PM2.5, motion, door/window, water leak, battery
 - Scenes: trigger them from a list
-- Toggle all the lights in a room at once
+- Devices grouped by room under foldable headers. A room header controls all the lights
+  in it: toggle them, or open the control panel to set the same brightness, temperature or
+  color everywhere (each bulb clamps temperature to its own range)
+- Outlets that power lamps can be marked with `m` so room controls include them
+- Remotes and switches can be hidden with `.`; folded rooms, lamp marks and this setting
+  are remembered
 - Device sets (combined lights, e.g. a fixture with several bulbs) show as one row
   that controls every bulb; press `e` to expand it and control bulbs one by one
 - Changes show up instantly, and the device list refreshes every few seconds
@@ -65,7 +70,11 @@ private, because anyone with the token can control your devices. You can also us
 | `[` `]`            | Warmer / cooler light                          |
 | `c` `C`            | Cycle color                                    |
 | `a`                | Toggle all lights in the selected device's room |
-| `e`                | Expand / collapse a device set                 |
+| `{` `}`            | Jump to the previous / next room               |
+| `e`                | Fold / unfold a room or a device set           |
+| `E`                | Fold / unfold all rooms                        |
+| `.`                | Hide / show remotes and switches               |
+| `m`                | Mark an outlet as a lamp, so room controls include it |
 | `i`                | Show the device's raw data from the hub        |
 | `r`                | Refresh now                                    |
 | `?`                | Help                                           |

@@ -19,7 +19,10 @@ cargo run -- pair <hub-ip>       # pair with a real hub (press its action button
 cargo run                        # start the TUI
 ```
 
-Config lives in `~/.config/dirigera-tui/config.toml` (`host`, `token`).
+Config lives in `~/.config/dirigera-tui/config.toml` (`host`, `token`). The TUI never writes
+it; folded rooms, lamp-marked outlets and the hide-remotes setting go to
+`~/.config/dirigera-tui/state` instead.
+When testing with tmux, set `XDG_CONFIG_HOME` to a scratch dir so you don't touch the user's state.
 The env vars `DIRIGERA_HOST` and `DIRIGERA_TOKEN` override it.
 
 ## Testing without a hub
@@ -94,7 +97,15 @@ raw attributes (press `i` in the TUI).
   builds edits on the last requested color, not the reported one, to avoid drift and getting
   stuck on a snapped hue.
 - `deviceType` values handled: `light`, `outlet`, `blinds`, `airPurifier`,
-  `environmentSensor`, `motionSensor`, `openCloseSensor`, `waterSensor`. `gateway` is hidden.
+  `environmentSensor`, `motionSensor`, `occupancySensor`, `openCloseSensor`, `waterSensor`,
+  `electricalSensor` (`currentActivePower` W), `lightSensor` (`illuminance` lx). Remotes
+  (`*Controller`, `genericSwitch`) are listed but have nothing to control. `gateway` is hidden.
+- One physical device can appear as several entries sharing a `relationId`: an outlet and its
+  `electricalSensor`, a motion sensor and its `lightSensor`, a remote's extra button sets. The
+  secondary parts often have no `room`, so the TUI gives them the room of a related entry.
+- Room headers control only `deviceType == "light"` devices plus outlets the user marked as
+  lamps with `m` (`App::is_light`), so a room toggle never switches off e.g. an appliance. Group edits go only to members that support the
+  control; temperature is sent as the same Kelvin to all, clamped to each bulb's range.
 - There is no official public API documentation. Behaviour has been worked out from community
   projects (for example the Python `dirigera` library).
 

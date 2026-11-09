@@ -22,6 +22,7 @@ devs=[
  {"id":"c","deviceType":"outlet","isReachable":True,"room":K,"attributes":{"customName":"Coffee","isOn":True}},
  {"id":"d","deviceType":"environmentSensor","isReachable":True,"room":K,"attributes":{"customName":"VINDSTYRKA","currentTemperature":21.4,"currentRH":44,"currentPM25":3}},
  {"id":"e","deviceType":"blinds","isReachable":False,"room":R,"attributes":{"customName":"Blind","blindsCurrentLevel":20,"blindsTargetLevel":20,"batteryPercentage":80}},
+ {"id":"rc","deviceType":"lightController","isReachable":True,"room":R,"attributes":{"customName":"Remote","batteryPercentage":55},"capabilities":{"canSend":["isOn","lightLevel"],"canReceive":["customName"]}},
  {"id":"g","deviceType":"gateway","isReachable":True,"attributes":{"customName":"hub"}},
 ]
 scenes=[{"id":"s1","info":{"name":"Movie night"}},{"id":"s2","info":{"name":"Good morning"}}]

@@ -116,6 +116,10 @@ pub struct Device {
     pub device_set: Option<Vec<SetRef>>,
     #[serde(default)]
     pub capabilities: Option<Capabilities>,
+    /// Shared by the parts of one physical device, e.g. an outlet and its power
+    /// meter, or the button sets of a remote.
+    #[serde(default)]
+    pub relation_id: Option<String>,
     #[serde(default)]
     pub attributes: Map<String, Value>,
 }
