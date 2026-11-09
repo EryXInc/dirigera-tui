@@ -6,15 +6,16 @@ Usage (from the repo root):
     python3 tools/mock_hub.py
     DIRIGERA_HOST=127.0.0.1:18443 DIRIGERA_TOKEN=TOK cargo run
 
-Logs every PATCH body to stderr. Device data is invented, not captured from a real hub (except the `deviceSet`
-shape, which matches a real hub).
+Logs every PATCH body to stderr. Device data is invented, not captured from a real hub (except the `deviceSet`,
+`capabilities` and `colorMode` shapes, which match a real hub).
 """
 import os
 import json, ssl, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 R={"id":"r1","name":"Living room"}; K={"id":"r2","name":"Kitchen"}
 devs=[
- {"id":"a","deviceType":"light","isReachable":True,"room":R,"attributes":{"customName":"Ceiling","model":"TRADFRI bulb","firmwareVersion":"1.0","isOn":True,"lightLevel":70,"colorTemperature":2700,"colorTemperatureMin":4000,"colorTemperatureMax":2202,"colorHue":30,"colorSaturation":0.5}},
+ {"id":"a","deviceType":"light","isReachable":True,"room":R,"attributes":{"customName":"Ceiling","model":"TRADFRI bulb","firmwareVersion":"1.0","isOn":True,"lightLevel":70,"colorTemperature":2700,"colorTemperatureMin":4000,"colorTemperatureMax":2202,"colorHue":30,"colorSaturation":0.5,"colorMode":"color"},"capabilities":{"canSend":[],"canReceive":["customName","isOn","lightLevel","colorTemperature","colorHue","colorSaturation"]}},
+ {"id":"w","deviceType":"light","isReachable":True,"room":R,"attributes":{"customName":"White bulb","isOn":True,"lightLevel":40,"colorTemperature":2202,"colorTemperatureMin":6535,"colorTemperatureMax":2202,"colorHue":30,"colorSaturation":0.5,"colorMode":"color"},"capabilities":{"canSend":[],"canReceive":["isOn","lightLevel","colorTemperature","customName"]}},
  {"id":"b","deviceType":"light","isReachable":True,"room":R,"attributes":{"customName":"Floor lamp","isOn":False,"lightLevel":40}},
  {"id":"s1","deviceType":"light","isReachable":True,"room":K,"deviceSet":[{"id":"set1","name":"Spots","icon":"lighting_group"}],"attributes":{"customName":"Spot 1","isOn":True,"lightLevel":50,"colorTemperature":3000,"colorTemperatureMin":4000,"colorTemperatureMax":2202}},
  {"id":"s2","deviceType":"light","isReachable":True,"room":K,"deviceSet":[{"id":"set1","name":"Spots","icon":"lighting_group"}],"attributes":{"customName":"Spot 2","isOn":False,"lightLevel":80,"colorTemperature":3000,"colorTemperatureMin":4000,"colorTemperatureMax":2202}},

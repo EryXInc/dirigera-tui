@@ -41,7 +41,8 @@ raw attributes (press `i` in the TUI).
 - `src/api.rs`: hub client. PKCE pairing, `Device` and `Scene` types, and the
   `devices()`, `scenes()`, `set_attributes()` and `trigger_scene()` calls.
 - `src/app.rs`: everything in the TUI, in sections: background worker, `App` state and key
-  handling, rendering, and the `run()` loop.
+  handling, rendering, and the `run()` loop. Device parameters are modelled as `Ctl`s;
+  `set_ctl()`/`nudge()`/`set_frac()` are shared by the list hotkeys and the control panel.
 
 ## Architecture
 
@@ -79,6 +80,11 @@ raw attributes (press `i` in the TUI).
   `{id, name, icon}` (verified on a real hub; empty when not in a set). The TUI groups members
   into one row and controls a set by PATCHing each member. No set list or set PATCH endpoint
   has been found (`/device-set` and `/deviceSets` return 404).
+- `capabilities.canReceive` lists the attributes a device accepts. It matters: white-spectrum
+  bulbs report `colorHue`/`colorSaturation` but don't accept them. `Device::can()` checks it,
+  and `ctls()` in `app.rs` uses it to decide which control-panel rows to show.
+- `colorMode` is `"color"` or (presumably) `"temperature"`. Only `"color"` has been seen on a
+  real hub so far.
 - `deviceType` values handled: `light`, `outlet`, `blinds`, `airPurifier`,
   `environmentSensor`, `motionSensor`, `openCloseSensor`, `waterSensor`. `gateway` is hidden.
 - There is no official public API documentation. Behaviour has been worked out from community

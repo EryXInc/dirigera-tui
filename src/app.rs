@@ -133,6 +133,86 @@ struct DevSet {
     members: Vec<usize>,
 }
 
+/// One adjustable parameter of a device, shown as a row in the control panel.
+#[derive(PartialEq, Clone, Copy)]
+enum Ctl {
+    Power,
+    Level,
+    Temp,
+    Hue,
+    Sat,
+    Blinds,
+    Fan,
+}
+
+impl Ctl {
+    fn label(self) -> &'static str {
+        match self {
+            Ctl::Power => "Power",
+            Ctl::Level => "Brightness",
+            Ctl::Temp => "Temp",
+            Ctl::Hue => "Hue",
+            Ctl::Sat => "Saturation",
+            Ctl::Blinds => "Position",
+            Ctl::Fan => "Fan",
+        }
+    }
+}
+
+const FAN_MODES: [&str; 5] = ["off", "auto", "low", "medium", "high"];
+
+/// (current, low, high) color temperature in Kelvin. The hub's min/max can be
+/// in either order.
+fn temp_range(d: &Device) -> Option<(f64, f64, f64)> {
+    let (k, a, b) = (
+        d.n("colorTemperature")?,
+        d.n("colorTemperatureMin")?,
+        d.n("colorTemperatureMax")?,
+    );
+    let (lo, hi) = (a.min(b), a.max(b));
+    (hi > lo).then_some((k, lo, hi))
+}
+
+fn blinds_level(d: &Device) -> f64 {
+    d.n("blindsTargetLevel")
+        .or(d.n("blindsCurrentLevel"))
+        .unwrap_or(0.0)
+}
+
+fn fan_index(d: &Device) -> usize {
+    let cur = d.s("fanMode").unwrap_or("off");
+    FAN_MODES.iter().position(|m| *m == cur).unwrap_or(0)
+}
+
+/// The controls a device supports, in display order.
+fn ctls(d: &Device) -> Vec<Ctl> {
+    let blinds = d.device_type == "blinds";
+    [
+        (
+            Ctl::Power,
+            !blinds && d.can("isOn") && d.b("isOn").is_some(),
+        ),
+        (
+            Ctl::Level,
+            d.can("lightLevel") && d.n("lightLevel").is_some(),
+        ),
+        (
+            Ctl::Temp,
+            d.can("colorTemperature") && temp_range(d).is_some(),
+        ),
+        (Ctl::Hue, d.can("colorHue") && d.n("colorHue").is_some()),
+        (
+            Ctl::Sat,
+            d.can("colorSaturation") && d.n("colorSaturation").is_some(),
+        ),
+        (Ctl::Blinds, blinds && d.can("blindsTargetLevel")),
+        (Ctl::Fan, d.device_type == "airPurifier" && d.can("fanMode")),
+    ]
+    .into_iter()
+    .filter_map(|(c, ok)| ok.then_some(c))
+    .collect()
+}
+
 struct App {
     tab: Tab,
     devices: Vec<Device>,
@@ -148,6 +228,8 @@ struct App {
     seq: u64,
     loaded: bool,
     raw: bool,
+    /// Selected control row while the control panel has focus.
+    focus: Option<usize>,
     help: bool,
     quit: bool,
 }
@@ -335,18 +417,13 @@ impl App {
         let (i, ts) = self.targets(it);
         let d = &self.devices[i];
         if d.device_type == "blinds" {
-            let cur = d
-                .n("blindsTargetLevel")
-                .or(d.n("blindsCurrentLevel"))
-                .unwrap_or(0.0);
+            let cur = blinds_level(d);
             self.apply(
                 &ts,
                 json!({ "blindsTargetLevel": if cur < 50.0 { 100 } else { 0 } }),
             );
         } else if d.device_type == "airPurifier" {
-            const MODES: [&str; 5] = ["off", "auto", "low", "medium", "high"];
-            let cur = d.s("fanMode").unwrap_or("off");
-            let next = MODES[(MODES.iter().position(|m| *m == cur).unwrap_or(0) + 1) % MODES.len()];
+            let next = FAN_MODES[(fan_index(d) + 1) % FAN_MODES.len()];
             self.apply(&ts, json!({ "fanMode": next }));
         } else if d.b("isOn").is_some() {
             // For a set: if anything is on, turn everything off.
@@ -357,61 +434,143 @@ impl App {
         }
     }
 
-    fn adjust(&mut self, it: Item, delta: f64) {
+    /// Set a control to an absolute value (in the control's own units). `wake`
+    /// turns lights on when brightness changes, so brightening an off light works.
+    fn set_ctl(&mut self, it: Item, ctl: Ctl, v: f64, wake: bool) {
         let (i, ts) = self.targets(it);
         let d = &self.devices[i];
-        if let Some(lvl) = d.n("lightLevel") {
-            let new = (lvl + delta).clamp(1.0, 100.0) as i64;
-            let any_off = ts.iter().any(|&j| self.devices[j].b("isOn") == Some(false));
-            if any_off && delta > 0.0 {
-                self.apply(&ts, json!({ "isOn": true, "lightLevel": new }));
-            } else {
-                self.apply(&ts, json!({ "lightLevel": new }));
+        let attrs = match ctl {
+            Ctl::Power => json!({ "isOn": v > 0.5 }),
+            Ctl::Level => {
+                let lvl = v.round().clamp(1.0, 100.0) as i64;
+                let any_off = ts.iter().any(|&j| self.devices[j].b("isOn") == Some(false));
+                if wake && any_off {
+                    json!({ "isOn": true, "lightLevel": lvl })
+                } else {
+                    json!({ "lightLevel": lvl })
+                }
             }
-        } else if d.device_type == "blinds" {
-            let cur = d
-                .n("blindsTargetLevel")
-                .or(d.n("blindsCurrentLevel"))
-                .unwrap_or(0.0);
-            self.apply(
-                &ts,
-                json!({ "blindsTargetLevel": (cur + delta).clamp(0.0, 100.0) as i64 }),
-            );
-        } else {
-            self.status("This device has no adjustable level", true);
+            Ctl::Temp => {
+                let Some((_, lo, hi)) = temp_range(d) else {
+                    return;
+                };
+                json!({ "colorTemperature": v.clamp(lo, hi).round() as i64 })
+            }
+            Ctl::Hue => {
+                // A hue change on a desaturated bulb would be invisible.
+                let sat = d.n("colorSaturation").unwrap_or(0.0);
+                let sat = if sat < 0.1 { 1.0 } else { sat };
+                json!({ "colorHue": v.rem_euclid(360.0).round(), "colorSaturation": sat })
+            }
+            Ctl::Sat => json!({ "colorSaturation": (v.clamp(0.0, 1.0) * 100.0).round() / 100.0 }),
+            Ctl::Blinds => json!({ "blindsTargetLevel": v.round().clamp(0.0, 100.0) as i64 }),
+            Ctl::Fan => {
+                json!({ "fanMode": FAN_MODES[(v.round() as usize).min(FAN_MODES.len() - 1)] })
+            }
+        };
+        self.apply(&ts, attrs);
+    }
+
+    /// Move a control by `steps` fine steps (1% brightness, 1° hue, ...).
+    fn nudge(&mut self, it: Item, ctl: Ctl, steps: f64) {
+        let d = &self.devices[self.targets(it).0];
+        let v = match ctl {
+            Ctl::Power => (steps > 0.0) as u8 as f64,
+            Ctl::Level => d.n("lightLevel").unwrap_or(0.0) + steps,
+            Ctl::Temp => {
+                let Some((cur, lo, hi)) = temp_range(d) else {
+                    return;
+                };
+                cur + steps * ((hi - lo) / 100.0).max(1.0)
+            }
+            Ctl::Hue => d.n("colorHue").unwrap_or(0.0) + steps,
+            Ctl::Sat => d.n("colorSaturation").unwrap_or(0.0) + steps / 100.0,
+            Ctl::Blinds => blinds_level(d) + steps,
+            Ctl::Fan => {
+                let n = FAN_MODES.len() as i64;
+                (fan_index(d) as i64 + steps.signum() as i64).rem_euclid(n) as f64
+            }
+        };
+        self.set_ctl(it, ctl, v, steps > 0.0);
+    }
+
+    /// Jump a control to a fraction (0..=1) of its range.
+    fn set_frac(&mut self, it: Item, ctl: Ctl, f: f64) {
+        let d = &self.devices[self.targets(it).0];
+        let v = match ctl {
+            Ctl::Power | Ctl::Sat => f,
+            Ctl::Level | Ctl::Blinds => f * 100.0,
+            Ctl::Temp => {
+                let Some((_, lo, hi)) = temp_range(d) else {
+                    return;
+                };
+                lo + f * (hi - lo)
+            }
+            Ctl::Hue => f * 359.0,
+            Ctl::Fan => f * (FAN_MODES.len() - 1) as f64,
+        };
+        self.set_ctl(it, ctl, v, true);
+    }
+
+    /// List-view hotkey: nudge the first of `prefer` that the device supports.
+    fn hot(&mut self, it: Item, prefer: &[Ctl], steps: f64) {
+        let cs = ctls(&self.devices[self.targets(it).0]);
+        match prefer.iter().find(|c| cs.contains(c)) {
+            Some(&c) => self.nudge(it, c, steps),
+            None => self.status("Not supported by this device", true),
         }
     }
 
-    fn color_temp(&mut self, it: Item, dir: f64) {
-        let (i, ts) = self.targets(it);
-        let d = &self.devices[i];
-        let (Some(cur), Some(a), Some(b)) = (
-            d.n("colorTemperature"),
-            d.n("colorTemperatureMin"),
-            d.n("colorTemperatureMax"),
-        ) else {
-            return self.status("This device has no color temperature", true);
-        };
-        let (lo, hi) = (a.min(b), a.max(b));
-        let step = ((hi - lo) / 10.0).max(1.0);
-        self.apply(
-            &ts,
-            json!({ "colorTemperature": (cur + dir * step).clamp(lo, hi) as i64 }),
-        );
+    fn open_panel(&mut self, it: Item) {
+        let cs = ctls(&self.devices[self.targets(it).0]);
+        if cs.is_empty() {
+            return self.status("Nothing to control on this device", true);
+        }
+        self.focus = Some(cs.iter().position(|&c| c == Ctl::Level).unwrap_or(0));
     }
 
-    fn hue(&mut self, it: Item, dir: f64) {
-        let (i, ts) = self.targets(it);
-        let d = &self.devices[i];
-        let Some(h) = d.n("colorHue") else {
-            return self.status("This device has no color support", true);
+    fn on_panel_key(&mut self, code: KeyCode) {
+        let Some(it) = self.sel_item() else {
+            self.focus = None;
+            return;
         };
-        let sat = d.n("colorSaturation").unwrap_or(0.0);
-        let sat = if sat < 0.1 { 1.0 } else { sat };
-        self.apply(
-            &ts,
-            json!({ "colorHue": (h + 30.0 * dir).rem_euclid(360.0), "colorSaturation": sat }),
-        );
+        let cs = ctls(&self.devices[self.targets(it).0]);
+        if cs.is_empty() {
+            self.focus = None;
+            return;
+        }
+        let f = self.focus.unwrap_or(0).min(cs.len() - 1);
+        self.focus = Some(f);
+        let ctl = cs[f];
+        match code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace | KeyCode::Char('q') => {
+                self.focus = None
+            }
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('2') => {
+                self.focus = None;
+                self.tab = Tab::Scenes;
+            }
+            KeyCode::Down | KeyCode::Char('j') => self.focus = Some((f + 1).min(cs.len() - 1)),
+            KeyCode::Up | KeyCode::Char('k') => self.focus = Some(f.saturating_sub(1)),
+            KeyCode::Home | KeyCode::Char('g') => self.focus = Some(0),
+            KeyCode::End | KeyCode::Char('G') => self.focus = Some(cs.len() - 1),
+            KeyCode::Right | KeyCode::Char('l' | '+' | '=') => self.nudge(it, ctl, 10.0),
+            KeyCode::Left | KeyCode::Char('h' | '-') => self.nudge(it, ctl, -10.0),
+            KeyCode::Char('L') => self.nudge(it, ctl, 1.0),
+            KeyCode::Char('H') => self.nudge(it, ctl, -1.0),
+            KeyCode::Char(c @ '0'..='9') => {
+                let n = c.to_digit(10).unwrap_or(0) as f64;
+                self.set_frac(it, ctl, if n == 0.0 { 1.0 } else { n / 10.0 });
+            }
+            KeyCode::Char(' ') => self.toggle(it),
+            KeyCode::Char('i') => self.raw = !self.raw,
+            KeyCode::Char('?') => self.help = true,
+            KeyCode::Char('r') => {
+                let _ = self.tx.send(Cmd::Refresh);
+                self.status("Refreshing…", false);
+            }
+            _ => {}
+        }
     }
 
     fn room_toggle(&mut self, it: Item) {
@@ -444,6 +603,9 @@ impl App {
         if self.help {
             self.help = false;
             return;
+        }
+        if self.focus.is_some() && self.tab == Tab::Devices {
+            return self.on_panel_key(code);
         }
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
@@ -482,15 +644,20 @@ impl App {
                 let Some(i) = self.sel_item() else { return };
                 match code {
                     KeyCode::Char('e') => self.toggle_expand(i),
-                    KeyCode::Enter | KeyCode::Char(' ') => self.toggle(i),
-                    KeyCode::Right | KeyCode::Char('l' | '+' | '=') => self.adjust(i, 10.0),
-                    KeyCode::Left | KeyCode::Char('h' | '-') => self.adjust(i, -10.0),
-                    KeyCode::Char('L') => self.adjust(i, 1.0),
-                    KeyCode::Char('H') => self.adjust(i, -1.0),
-                    KeyCode::Char('[') => self.color_temp(i, -1.0),
-                    KeyCode::Char(']') => self.color_temp(i, 1.0),
-                    KeyCode::Char('c') => self.hue(i, 1.0),
-                    KeyCode::Char('C') => self.hue(i, -1.0),
+                    KeyCode::Enter => self.open_panel(i),
+                    KeyCode::Char(' ') => self.toggle(i),
+                    KeyCode::Right | KeyCode::Char('l' | '+' | '=') => {
+                        self.hot(i, &[Ctl::Level, Ctl::Blinds], 10.0)
+                    }
+                    KeyCode::Left | KeyCode::Char('h' | '-') => {
+                        self.hot(i, &[Ctl::Level, Ctl::Blinds], -10.0)
+                    }
+                    KeyCode::Char('L') => self.hot(i, &[Ctl::Level, Ctl::Blinds], 1.0),
+                    KeyCode::Char('H') => self.hot(i, &[Ctl::Level, Ctl::Blinds], -1.0),
+                    KeyCode::Char('[') => self.hot(i, &[Ctl::Temp], -10.0),
+                    KeyCode::Char(']') => self.hot(i, &[Ctl::Temp], 10.0),
+                    KeyCode::Char('c') => self.hot(i, &[Ctl::Hue], 30.0),
+                    KeyCode::Char('C') => self.hot(i, &[Ctl::Hue], -30.0),
                     KeyCode::Char('a') => self.room_toggle(i),
                     _ => {}
                 }
@@ -629,11 +796,119 @@ fn raw_lines(d: &Device) -> Vec<Line<'static>> {
     txt.lines().map(|l| Line::raw(l.to_string())).collect()
 }
 
-fn details(d: &Device, raw: bool) -> Vec<Line<'static>> {
+/// A `w`-cell gradient (colored by `color(0..=1)`) with a marker at `frac`.
+fn gradient(w: usize, frac: f64, color: impl Fn(f64) -> Color) -> Vec<Span<'static>> {
+    let last = w.saturating_sub(1).max(1) as f64;
+    let pos = (frac.clamp(0.0, 1.0) * last).round() as usize;
+    (0..w)
+        .map(|x| {
+            let c = color(x as f64 / last);
+            if x == pos {
+                Span::styled("┃", Style::new().fg(Color::Black).bg(c).bold())
+            } else {
+                Span::styled(" ", Style::new().bg(c))
+            }
+        })
+        .collect()
+}
+
+/// Width of the slider part of a control row in a pane `inner` columns wide.
+fn slider_width(inner: usize) -> usize {
+    // marker (2) + label (11) + value (6)
+    inner.saturating_sub(19).max(4)
+}
+
+/// One control row: marker, label, slider and value.
+fn ctl_line(d: &Device, ctl: Ctl, focused: bool, w: usize) -> Line<'static> {
+    let yellow = Style::new().fg(Color::Yellow);
+    let dim = Style::new().fg(Color::DarkGray);
+    let mut spans = vec![
+        Span::styled(if focused { "▶ " } else { "  " }, yellow),
+        Span::styled(
+            format!("{:<11}", ctl.label()),
+            if focused { yellow.bold() } else { dim },
+        ),
+    ];
+    // Bulbs are either in color or in temperature mode; dim the other one.
+    let mode = d.s("colorMode");
+    let inactive = match ctl {
+        Ctl::Temp => mode == Some("color"),
+        Ctl::Hue | Ctl::Sat => mode == Some("temperature"),
+        _ => false,
+    };
+    let on = d.b("isOn") != Some(false);
+    let (slider, val) = match ctl {
+        Ctl::Power => {
+            spans.push(if on {
+                Span::styled("● on", yellow)
+            } else {
+                Span::styled("○ off", dim)
+            });
+            return Line::from(spans);
+        }
+        Ctl::Fan => {
+            spans.push(Span::raw(format!("‹ {} ›", FAN_MODES[fan_index(d)])));
+            return Line::from(spans);
+        }
+        Ctl::Level => {
+            let l = d.n("lightLevel").unwrap_or(0.0);
+            let c = if on { Color::Yellow } else { Color::Gray };
+            (bar(l / 100.0, w, c), format!("{l:.0}%"))
+        }
+        Ctl::Temp => {
+            let (k, lo, hi) = temp_range(d).unwrap_or((0.0, 0.0, 1.0));
+            let g = gradient(w, (k - lo) / (hi - lo), |t| {
+                kelvin_color(lo + t * (hi - lo))
+            });
+            (g, format!("{k:.0}K"))
+        }
+        Ctl::Hue => {
+            let h = d.n("colorHue").unwrap_or(0.0);
+            (
+                gradient(w, h / 360.0, |t| hsv(t * 360.0, 1.0, 1.0)),
+                format!("{h:.0}°"),
+            )
+        }
+        Ctl::Sat => {
+            let h = d.n("colorHue").unwrap_or(0.0);
+            let s = d.n("colorSaturation").unwrap_or(0.0);
+            (
+                gradient(w, s, |t| hsv(h, t, 1.0)),
+                format!("{:.0}%", s * 100.0),
+            )
+        }
+        Ctl::Blinds => {
+            let l = blinds_level(d);
+            (bar(l / 100.0, w, Color::Cyan), format!("{l:.0}%"))
+        }
+    };
+    spans.extend(slider);
+    spans.push(Span::styled(
+        format!(" {val:>5}"),
+        if inactive { dim } else { Style::new() },
+    ));
+    Line::from(spans)
+}
+
+/// The control rows for a device; `focus` marks the selected one.
+fn controls(d: &Device, focus: Option<usize>, w: usize) -> Vec<Line<'static>> {
+    let cs = ctls(d);
+    let f = focus.map(|f| f.min(cs.len().saturating_sub(1)));
+    cs.iter()
+        .enumerate()
+        .map(|(j, &c)| ctl_line(d, c, f == Some(j), w))
+        .collect()
+}
+
+fn details(d: &Device, raw: bool, focus: Option<usize>, w: usize) -> Vec<Line<'static>> {
     if raw {
         return raw_lines(d);
     }
-    let mut lines = Vec::new();
+    let mut lines = controls(d, focus, w);
+    if !lines.is_empty() {
+        lines.push(Line::raw(""));
+    }
+    let cs = ctls(d);
     let mut kv = |k: &str, v: String| lines.push(Line::from(vec![label(k), Span::raw(v)]));
     kv("Type", d.device_type.clone());
     kv("Room", d.room_name().to_string());
@@ -651,10 +926,16 @@ fn details(d: &Device, raw: bool) -> Vec<Line<'static>> {
             "no".into()
         },
     );
+    if let (Some(m), true) = (
+        d.s("colorMode"),
+        cs.contains(&Ctl::Temp) && cs.contains(&Ctl::Hue),
+    ) {
+        kv("Mode", m.to_string());
+    }
     if let Some(b) = d.n("batteryPercentage") {
         kv("Battery", format!("{b:.0}%"));
     }
-    if let Some(on) = d.b("isOn") {
+    if let (Some(on), false) = (d.b("isOn"), cs.contains(&Ctl::Power)) {
         kv("Power", if on { "on".into() } else { "off".into() });
     }
     if let Some(t) = d.n("currentTemperature") {
@@ -666,16 +947,18 @@ fn details(d: &Device, raw: bool) -> Vec<Line<'static>> {
     if let Some(p) = d.n("currentPM25") {
         kv("PM2.5", format!("{p:.0} µg/m³"));
     }
-    if let Some(m) = d.s("fanMode") {
-        kv("Fan mode", m.to_string());
-    }
-    lines.push(Line::raw(""));
-    lines.extend(controls(d));
     lines
 }
 
-/// Details for a device set: its members, then the controls of the representative.
-fn set_details(s: &DevSet, devices: &[Device], rep: usize, raw: bool) -> Vec<Line<'static>> {
+/// Details for a device set: the representative's controls, then its members.
+fn set_details(
+    s: &DevSet,
+    devices: &[Device],
+    rep: usize,
+    raw: bool,
+    focus: Option<usize>,
+    w: usize,
+) -> Vec<Line<'static>> {
     let dim = Style::new().fg(Color::DarkGray);
     let r = &devices[rep];
     if raw {
@@ -683,7 +966,11 @@ fn set_details(s: &DevSet, devices: &[Device], rep: usize, raw: bool) -> Vec<Lin
         lines.extend(raw_lines(r));
         return lines;
     }
-    let mut lines = vec![
+    let mut lines = controls(r, focus, w);
+    if !lines.is_empty() {
+        lines.push(Line::raw(""));
+    }
+    lines.extend([
         Line::from(vec![
             label("Type"),
             Span::raw(format!("{} set", r.device_type)),
@@ -693,7 +980,7 @@ fn set_details(s: &DevSet, devices: &[Device], rep: usize, raw: bool) -> Vec<Lin
             label("Members"),
             Span::raw(s.members.len().to_string()),
         ]),
-    ];
+    ]);
     for &j in &s.members {
         let d = &devices[j];
         let (icon, istyle, val) = summary(d);
@@ -703,50 +990,6 @@ fn set_details(s: &DevSet, devices: &[Device], rep: usize, raw: bool) -> Vec<Lin
             Span::raw(format!(" {} ", d.name())),
             Span::styled(val, dim),
         ]));
-    }
-    lines.push(Line::raw(""));
-    lines.extend(controls(r));
-    lines
-}
-
-/// Bars for brightness, color temperature, color and blinds level.
-fn controls(d: &Device) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    const W: usize = 20;
-    if let Some(l) = d.n("lightLevel") {
-        let mut spans = vec![label("Brightness")];
-        spans.extend(bar(l / 100.0, W, Color::Yellow));
-        spans.push(Span::raw(format!(" {l:.0}%")));
-        lines.push(Line::from(spans));
-    }
-    if let (Some(k), Some(a), Some(b)) = (
-        d.n("colorTemperature"),
-        d.n("colorTemperatureMin"),
-        d.n("colorTemperatureMax"),
-    ) {
-        let (lo, hi) = (a.min(b), a.max(b));
-        let mut spans = vec![label("Color temp")];
-        spans.extend(bar((k - lo) / (hi - lo).max(1.0), W, kelvin_color(k)));
-        spans.push(Span::raw(format!(" {k:.0}K")));
-        lines.push(Line::from(spans));
-    }
-    if let Some(h) = d.n("colorHue") {
-        let s = d.n("colorSaturation").unwrap_or(0.0);
-        lines.push(Line::from(vec![
-            label("Color"),
-            Span::styled(
-                "█".repeat(W),
-                Style::new().fg(hsv(h, s.clamp(0.0, 1.0), 1.0)),
-            ),
-            Span::raw(format!(" {h:.0}° / {:.0}%", s * 100.0)),
-        ]));
-    }
-    if d.device_type == "blinds" {
-        let cur = d.n("blindsCurrentLevel").unwrap_or(0.0);
-        let mut spans = vec![label("Closed")];
-        spans.extend(bar(cur / 100.0, W, Color::Cyan));
-        spans.push(Span::raw(format!(" {cur:.0}%")));
-        lines.push(Line::from(spans));
     }
     lines
 }
@@ -765,7 +1008,8 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 const HELP: &[(&str, &str)] = &[
     ("j/k ↑/↓", "move"),
     ("Tab 1 2", "switch Devices / Scenes"),
-    ("Space Enter", "toggle / trigger scene"),
+    ("Space", "toggle / trigger scene"),
+    ("Enter", "open controls / trigger scene"),
     ("h/l ←/→ -/+", "brightness or blinds ±10"),
     ("H/L", "brightness ±1"),
     ("[ ]", "warmer / cooler"),
@@ -775,6 +1019,12 @@ const HELP: &[(&str, &str)] = &[
     ("i", "show raw attributes"),
     ("r", "refresh"),
     ("q Esc", "quit"),
+    ("", ""),
+    ("In controls:", ""),
+    ("j/k", "choose a control"),
+    ("h/l H/L", "adjust ±10 / ±1"),
+    ("1-9 0", "set to 10%-90% / 100%"),
+    ("Esc q Enter", "back to list"),
 ];
 
 fn draw(f: &mut Frame, app: &mut App) {
@@ -809,9 +1059,15 @@ fn draw(f: &mut Frame, app: &mut App) {
             centered(body, 60, 3),
         );
     } else if app.tab == Tab::Devices {
-        let [list_area, detail_area] =
-            Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
-                .areas(body);
+        // The control panel gets more room while it has focus.
+        let focused = app.focus.is_some();
+        let split = if focused { 50 } else { 58 };
+        let [list_area, detail_area] = Layout::horizontal([
+            Constraint::Percentage(split),
+            Constraint::Percentage(100 - split),
+        ])
+        .areas(body);
+        let w = slider_width(detail_area.width.saturating_sub(2) as usize);
         let rows = app.items.iter().map(|&it| {
             let (d, name, reachable, val) = match it {
                 Item::Dev(i) => {
@@ -876,7 +1132,15 @@ fn draw(f: &mut Frame, app: &mut App) {
                 Constraint::Length(12),
             ],
         )
-        .block(Block::bordered().title(format!(" Devices ({}) ", app.devices.len())))
+        .block(
+            Block::bordered()
+                .title(format!(" Devices ({}) ", app.devices.len()))
+                .border_style(if focused {
+                    Style::new().fg(Color::DarkGray)
+                } else {
+                    Style::new()
+                }),
+        )
         .row_highlight_style(Style::new().bg(Color::Rgb(50, 50, 60)).bold())
         .highlight_symbol("▶ ");
         f.render_stateful_widget(table, list_area, &mut app.dev_state);
@@ -884,12 +1148,13 @@ fn draw(f: &mut Frame, app: &mut App) {
         let pane = match app.sel_item() {
             Some(Item::Dev(i)) => {
                 let d = &app.devices[i];
-                Some((d.name(), details(d, app.raw)))
+                Some((d.name(), details(d, app.raw, app.focus, w)))
             }
             Some(it @ Item::Set(k)) => {
                 let s = &app.sets[k];
                 let rep = app.targets(it).0;
-                Some((s.name.clone(), set_details(s, &app.devices, rep, app.raw)))
+                let lines = set_details(s, &app.devices, rep, app.raw, app.focus, w);
+                Some((s.name.clone(), lines))
             }
             None => None,
         };
@@ -897,7 +1162,11 @@ fn draw(f: &mut Frame, app: &mut App) {
             let title = format!(" {name} {}", if app.raw { "(raw) " } else { "" });
             f.render_widget(
                 Paragraph::new(lines)
-                    .block(Block::bordered().title(title))
+                    .block(Block::bordered().title(title).border_style(if focused {
+                        Style::new().fg(Color::Yellow)
+                    } else {
+                        Style::new()
+                    }))
                     .wrap(Wrap { trim: false }),
                 detail_area,
             );
@@ -926,8 +1195,12 @@ fn draw(f: &mut Frame, app: &mut App) {
             format!(" {msg}"),
             Style::new().fg(if *err { Color::Red } else { Color::Green }),
         ),
+        _ if app.focus.is_some() && app.tab == Tab::Devices => Line::styled(
+            " j/k choose · h/l adjust · H/L fine · 1-9 0 set · space power · esc back",
+            Style::new().fg(Color::DarkGray),
+        ),
         _ => Line::styled(
-            " space toggle · h/l level · [ ] temp · c hue · a room · tab scenes · ? help · q quit",
+            " enter controls · space toggle · h/l level · e set · ? help · q quit",
             Style::new().fg(Color::DarkGray),
         ),
     };
@@ -974,6 +1247,7 @@ pub fn run(client: Client) -> Result<()> {
         seq: 0,
         loaded: false,
         raw: false,
+        focus: None,
         help: false,
         quit: false,
     };

@@ -96,6 +96,14 @@ pub struct SetRef {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Capabilities {
+    /// Attributes the device accepts in a PATCH.
+    #[serde(default)]
+    pub can_receive: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Device {
     pub id: String,
     #[serde(default)]
@@ -106,6 +114,8 @@ pub struct Device {
     pub room: Option<Room>,
     #[serde(default)]
     pub device_set: Option<Vec<SetRef>>,
+    #[serde(default)]
+    pub capabilities: Option<Capabilities>,
     #[serde(default)]
     pub attributes: Map<String, Value>,
 }
@@ -130,6 +140,19 @@ impl Device {
             .find(|s| !s.is_empty())
             .unwrap_or(&self.device_type)
             .to_string()
+    }
+    /// Whether the device accepts `attr`. Devices that don't report capabilities
+    /// are assumed to accept everything. Some bulbs report `colorHue` without
+    /// accepting it, so check this before offering a control.
+    pub fn can(&self, attr: &str) -> bool {
+        match self
+            .capabilities
+            .as_ref()
+            .and_then(|c| c.can_receive.as_ref())
+        {
+            Some(list) if !list.is_empty() => list.iter().any(|a| a == attr),
+            _ => true,
+        }
     }
     /// The set this device belongs to, if any.
     pub fn set(&self) -> Option<&SetRef> {

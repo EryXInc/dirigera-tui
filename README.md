@@ -9,7 +9,8 @@ It talks directly to the hub on your local network, with no cloud and no IKEA ac
 
 ## Features
 
-- Lights: on/off, brightness, color temperature, color
+- Lights: on/off, brightness, color temperature, hue and saturation, with a control
+  panel of sliders (press `Enter` on a device)
 - Outlets: on/off
 - Blinds: open/close and position
 - Air purifiers: fan mode
@@ -57,7 +58,8 @@ private, because anyone with the token can control your devices. You can also us
 |--------------------|------------------------------------------------|
 | `j` `k` / `↑` `↓`  | Move                                           |
 | `Tab`, `1`, `2`    | Switch between Devices and Scenes              |
-| `Space` / `Enter`  | Toggle device / trigger scene                  |
+| `Space`            | Toggle device / trigger scene                  |
+| `Enter`            | Open the control panel / trigger scene         |
 | `h` `l` / `←` `→`  | Brightness or blinds position −/+10            |
 | `H` `L`            | Brightness −/+1                                |
 | `[` `]`            | Warmer / cooler light                          |
@@ -68,6 +70,21 @@ private, because anyone with the token can control your devices. You can also us
 | `r`                | Refresh now                                    |
 | `?`                | Help                                           |
 | `q` / `Esc`        | Quit                                           |
+
+### Control panel
+
+Press `Enter` on a device or set to move focus into the panel on the right. It shows only
+the controls the device accepts, for example no hue for a white-spectrum bulb. Bulbs are in
+either color or temperature mode, and the inactive one's value is dimmed.
+
+| Key                | Action                                         |
+|--------------------|------------------------------------------------|
+| `j` `k` / `↑` `↓`  | Choose power, brightness, temperature, hue, saturation |
+| `h` `l` / `←` `→`  | Adjust by 10 steps                             |
+| `H` `L`            | Adjust by 1 step                               |
+| `1`–`9`, `0`       | Jump to 10%–90%, or 100%, of the range         |
+| `Space`            | Toggle power                                   |
+| `Esc` / `q` / `Enter` | Back to the list                            |
 
 ## Troubleshooting
 
